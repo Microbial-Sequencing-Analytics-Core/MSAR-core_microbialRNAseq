@@ -133,16 +133,18 @@ process bowtie2 {
 
     script:
     // https://www.metagenomics.wiki/tools/short-read/remove-host-sequences#h.p2wn17ntls79
-    index = params.bowtie2.(params.genome)
+    def index = params.bowtie2.(params.genome)
+    def input_reads = is_SE ? "-U ${reads[0]}" : "-1 ${reads[0]} -2 ${reads[1]}"
+    def unmapped_filter = is_SE ? "-f 4 -F 256" : "-f 12 -F 256"
     """
         bowtie2 -p ${task.cpus} -x ${index} \
-        -1 ${reads[0]} -2 ${reads[1]} \
+        ${input_reads} \
         | samtools sort -O BAM -o ${sample_name}.mapped_unmapped.bam
 
-        samtools index -@ 4 ${sample_name}.mapped_unmapped.bam
-        samtools stats -@ 4 ${sample_name}.mapped_unmapped.bam > ${sample_name}.mapped_unmapped.stats
+        samtools index ${sample_name}.mapped_unmapped.bam
+        samtools stats ${sample_name}.mapped_unmapped.bam > ${sample_name}.mapped_unmapped.stats
 
-        samtools view -@ 4 -b -f 12 -F 256 \
+        samtools view -b ${unmapped_filter} \
         ${sample_name}.mapped_unmapped.bam > ${sample_name}.both_unmapped.bam
 
     """
@@ -166,6 +168,20 @@ process star_host_removal {
 
     script:
     def index = params.star_index.(params.genome)
+    if (is_SE)
+    """
+        STAR --runThreadN ${task.cpus} \
+            --genomeDir ${index} \
+            --readFilesIn ${reads[0]} \
+            --readFilesCommand zcat \
+            --outSAMtype None \
+            --outReadsUnmapped Fastx \
+            --outFileNamePrefix ${sample_name}.
+
+        gzip -c ${sample_name}.Unmapped.out.mate1 > ${sample_name}.host_remove.R1.fastq.gz
+        touch ${sample_name}.host_remove.R2.fastq.gz
+    """
+    else
     """
         STAR --runThreadN ${task.cpus} \
             --genomeDir ${index} \
@@ -196,9 +212,17 @@ process split_reads_from_unmapped {
     tuple val(sample_name), path("${sample_name}.host_remove.R{1,2}.fastq.gz"), val(is_SE),  emit: split_reads
 
     script:
+    if (is_SE)
     """
         samtools sort -n ${bam_file} -o ${sample_name}.sorted.bam
-        samtools fastq -@ 6 ${sample_name}.sorted.bam \
+        samtools fastq ${sample_name}.sorted.bam \
+            -0 ${sample_name}.host_remove.R1.fastq.gz -n
+        touch ${sample_name}.host_remove.R2.fastq.gz
+    """
+    else
+    """
+        samtools sort -n ${bam_file} -o ${sample_name}.sorted.bam
+        samtools fastq ${sample_name}.sorted.bam \
             -1 ${sample_name}.host_remove.R1.fastq.gz \
             -2 ${sample_name}.host_remove.R2.fastq.gz \
             -0 /dev/null -s /dev/null -n
@@ -225,8 +249,9 @@ process metaphlan {
     script:
     def bowtie2db = "/mnt/beegfs/kimj32/reference/metaphlan4/metaphlan_databases/"
     // def bowtie2db = "/mnt/beegfs/root/MetaPhlAn/" // this is from the HPC - directory is not writable
+    def input_reads = is_SE ? "${reads[0]}" : "${reads[0]},${reads[1]}"
     """
-        metaphlan ${reads[0]},${reads[1]} \
+        metaphlan ${input_reads} \
         --nproc ${task.cpus} \
         --input_type fastq \
         -x mpa_vOct22_CHOCOPhlAnSGB_202212 \
@@ -252,8 +277,13 @@ process concat_fq {
     tuple val(sample_name), path("${sample_name}.concat.fastq.gz"), emit: concat_reads
 
     script:
+    if (is_SE)
     """
-        cat ${reads[0]} ${reads[1]} >   ${sample_name}.concat.fastq.gz
+        cp ${reads[0]} ${sample_name}.concat.fastq.gz
+    """
+    else
+    """
+        cat ${reads[0]} ${reads[1]} > ${sample_name}.concat.fastq.gz
     """
 }
 
@@ -279,8 +309,9 @@ process megahit {
     path("${sample_name}.*.log"), emit: "log"
 
     script:
+    def input_reads = is_SE ? "-r ${reads[0]}" : "-1 ${reads[0]} -2 ${reads[1]}"
     """
-        megahit -1 ${reads[0]} -2 ${reads[1]} \
+        megahit ${input_reads} \
             -o ${sample_name} \
             -t ${task.cpus} \
             --k-min 27 \
@@ -341,14 +372,16 @@ process kraken2{
 
     script:
     def kraken2_db = "/mnt/beegfs/kimj32/reference/KRAKEN_DB"
+    def paired_flag = is_SE ? "" : "--paired"
+    def input_reads = is_SE ? "${reads[0]}" : "${reads}"
     """
         kraken2 --db ${kraken2_db} \
         --threads ${task.cpus} \
         --use-names \
         --output ${sample_name}_kraken.txt \
         --report ${sample_name}_report.txt \
-        --paired \
-        ${reads}
+        ${paired_flag} \
+        ${input_reads}
      """
 }
 
