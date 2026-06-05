@@ -16,11 +16,12 @@ process bwa_mem {
     // -M: mark shorter split hits as secondary
     script:
     def index = params.bwa_index
+    def input_reads = is_SE ? "${reads[0]}" : "${reads[0]} ${reads[1]}"
     """
     bwa mem -M \
     -t ${task.cpus} \
     ${index} \
-    ${reads} \
+    ${input_reads} \
     | samtools sort \
     -O "BAM" \
     -o ${sample_name}.bam -
