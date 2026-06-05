@@ -1,66 +1,12 @@
 nextflow.enable.dsl=2
 
-process fastp {
-    tag "${meta.sample_name}"
-    label "process_medium"
-
-    publishDir "${launchDir}/analysis/fastp/", mode : "copy"
-
-    module "fastp/1.0.1"
-
-    input:
-    tuple val(meta), path(reads)
-
-    output:
-    tuple val(meta.sample_name), path("${meta.sample_name}_trimmed_R{1,2}.fastq.gz"), val(meta.single_end), emit: trim_reads
-    path("${meta.sample_name}.fastp.json"), emit: fastp_json
-
-    // --trim_front2 1
-    script:
-    def adapter = "/mnt/beegfs/kimj32/reference/adapters.fa"
-    //--adapter_fasta $adapter \
-    if(!meta.single_end) {
-    """
-        fastp \
-        -i ${reads[0]} \
-        -I ${reads[1]} \
-        --thread ${task.cpus} \
-        -o ${meta.sample_name}_trimmed_R1.fastq.gz \
-        -O ${meta.sample_name}_trimmed_R2.fastq.gz \
-        --json ${meta.sample_name}.fastp.json
-    """
-    } else {
-    """
-        fastp \
-        -i ${reads} \
-        --thread ${task.cpus} \
-        -o ${meta.sample_name}_trimmed_R1.fastq.gz \
-        --json ${meta.sample_name}.fastp.json
-        """
-    }
-}
-
-
-process fastqc {
-    tag "Fastqc on ${meta.sample_name}"
-    label "process_low"
-
-    publishDir "${launchDir}/analysis/fastqc/", mode: "copy"
-
-    module 'FastQC/0.11.9'
-
-    input:
-    tuple val(meta), path(reads)
-
-    output:
-    path ("*.zip"), emit: zips
-    path ("*.html"), emit: htmls
-
-    script:
-    """
-        fastqc --threads ${task.cpus} ${reads}
-    """
-}
+include { fastp                    } from './modules/fastp'
+include { fastqc                   } from './modules/fastqc'
+include { fastq_screen             } from './modules/fastq_screen'
+include { bowtie2                  } from './modules/bowtie2'
+include { split_reads_from_unmapped } from './modules/split_reads_from_unmapped'
+include { star_host_removal        } from './modules/star_host_removal'
+include { kraken_biom              } from './modules/kraken_biom'
 
 
 process multiqc {
@@ -81,151 +27,6 @@ process multiqc {
     config_yaml = "/home/kimj32/config_defaults.yaml"
     """
         multiqc ${files} --filename "multiqc_report.html" --config ${config_yaml}
-    """
-}
-
-
-process fastq_screen {
-    tag "Fastq-screen on ${sample_name}"
-    label "process_low"
-
-    publishDir "${launchDir}/analysis/fastq_screen", mode : "copy"
-
-    module 'FastQScreen/0.14.1'
-    module 'bowtie2/2.3.4.1'
-
-    input:
-    tuple val(sample_name), path(reads), val(is_SE)
-
-    output:
-    path("*.html")
-    path("*.txt"), emit: fastq_screen_out
-
-    // threads option is already defined in fastq_screeN_conf
-    script:
-    conf = "/mnt/beegfs/kimj32/polymerase/polymeraseDependencies/FastQ_Screen_Genomes/fastq_screen.conf"
-    """
-        fastq_screen --aligner bowtie2 \
-        --conf ${conf} \
-        ${reads[0]} \
-        --outdir ./  \
-        --threads ${task.cpus}
-    """
-}
-
-
-process bowtie2 {
-    tag "bowtie2 on ${sample_name}"
-    label "process_high"
-
-    publishDir "${launchDir}/analysis/bowtie2"
-
-    module 'bowtie2/2.3.4.1'
-    module "samtools/1.16.1"
-
-    input:
-    tuple val(sample_name), path(reads), val(is_SE)
-
-    output:
-    tuple val(sample_name), path("${sample_name}.mapped_unmapped.bam"), emit: bowtie2_mapped_unmapped_bam
-    tuple val(sample_name), path("${sample_name}.both_unmapped.bam"), val(is_SE), emit: bowtie2_bam_both_unmapped_bam
-    path("${sample_name}.mapped_unmapped.stats"), emit: samtools_stats
-
-    script:
-    // https://www.metagenomics.wiki/tools/short-read/remove-host-sequences#h.p2wn17ntls79
-    def index = params.bowtie2.(params.genome)
-    def input_reads = is_SE ? "-U ${reads[0]}" : "-1 ${reads[0]} -2 ${reads[1]}"
-    def unmapped_filter = is_SE ? "-f 4 -F 256" : "-f 12 -F 256"
-    """
-        bowtie2 -p ${task.cpus} -x ${index} \
-        ${input_reads} \
-        | samtools sort -O BAM -o ${sample_name}.mapped_unmapped.bam
-
-        samtools index ${sample_name}.mapped_unmapped.bam
-        samtools stats ${sample_name}.mapped_unmapped.bam > ${sample_name}.mapped_unmapped.stats
-
-        samtools view -b ${unmapped_filter} \
-        ${sample_name}.mapped_unmapped.bam > ${sample_name}.both_unmapped.bam
-
-    """
-}
-
-
-process star_host_removal {
-    tag "star on ${sample_name}"
-    label "process_high"
-
-    publishDir "${launchDir}/analysis/star"
-
-    module "STAR/2.7.10a"
-
-    input:
-    tuple val(sample_name), path(reads), val(is_SE)
-
-    output:
-    tuple val(sample_name), path("${sample_name}.host_remove.R{1,2}.fastq.gz"), val(is_SE), emit: split_reads
-    path("${sample_name}.Log.final.out"), emit: star_log
-
-    script:
-    def index = params.star_index.(params.genome)
-    if (is_SE)
-    """
-        STAR --runThreadN ${task.cpus} \
-            --genomeDir ${index} \
-            --readFilesIn ${reads[0]} \
-            --readFilesCommand zcat \
-            --outSAMtype None \
-            --outReadsUnmapped Fastx \
-            --outFileNamePrefix ${sample_name}.
-
-        gzip -c ${sample_name}.Unmapped.out.mate1 > ${sample_name}.host_remove.R1.fastq.gz
-        touch ${sample_name}.host_remove.R2.fastq.gz
-    """
-    else
-    """
-        STAR --runThreadN ${task.cpus} \
-            --genomeDir ${index} \
-            --readFilesIn ${reads[0]} ${reads[1]} \
-            --readFilesCommand zcat \
-            --outSAMtype None \
-            --outReadsUnmapped Fastx \
-            --outFileNamePrefix ${sample_name}.
-
-        gzip -c ${sample_name}.Unmapped.out.mate1 > ${sample_name}.host_remove.R1.fastq.gz
-        gzip -c ${sample_name}.Unmapped.out.mate2 > ${sample_name}.host_remove.R2.fastq.gz
-    """
-}
-
-
-process split_reads_from_unmapped {
-    tag "split reads - ${sample_name}"
-    label "process_medium"
-
-    publishDir "${launchDir}/analysis/split_reads"
-
-    module "samtools/1.16.1"
-
-    input:
-    tuple val(sample_name), path(bam_file), val(is_SE)
-
-    output:
-    tuple val(sample_name), path("${sample_name}.host_remove.R{1,2}.fastq.gz"), val(is_SE),  emit: split_reads
-
-    script:
-    if (is_SE)
-    """
-        samtools sort -n ${bam_file} -o ${sample_name}.sorted.bam
-        samtools fastq ${sample_name}.sorted.bam \
-            -0 ${sample_name}.host_remove.R1.fastq.gz -n
-        touch ${sample_name}.host_remove.R2.fastq.gz
-    """
-    else
-    """
-        samtools sort -n ${bam_file} -o ${sample_name}.sorted.bam
-        samtools fastq ${sample_name}.sorted.bam \
-            -1 ${sample_name}.host_remove.R1.fastq.gz \
-            -2 ${sample_name}.host_remove.R2.fastq.gz \
-            -0 /dev/null -s /dev/null -n
     """
 }
 
@@ -355,7 +156,7 @@ process humann {
 }
 
 
-process kraken2{
+process kraken2 {
     tag "kraken2 on ${sample_name}"
     label "process_high"
 
@@ -383,26 +184,6 @@ process kraken2{
         ${paired_flag} \
         ${input_reads}
      """
-}
-
-
-process kraken_biom {
-    tag "kraken_biom"
-    label "process_low"
-
-    publishDir "${launchDir}/analysis/kraken_biom", mode: "copy"
-
-    input:
-    path(reports)
-
-    output:
-    path("biom_table.tsv"), emit: biom_table
-
-    script:
-    def kraken_biom = "~/beegfs/python_env/kraken2/bin/kraken-biom"
-    """
-    ${kraken_biom} ${reports} --fmt tsv -o biom_table.tsv
-    """
 }
 
 
@@ -478,7 +259,7 @@ process make_taxa_counts {
 
 
 // https://github.com/biobakery/MetaPhlAn/wiki/StrainPhlAn-4.1
-process StrainPhlAn{
+process StrainPhlAn {
     tag "StrainPhlAn on ${sample_name}"
     label "memory_medium"
 
@@ -528,9 +309,8 @@ process concensus_markers {
     """
         sample2markers.py -i ${StrainPhlAn_sam_bz2} -o consensus_markers -n ${task.cpus}
     """
-
-
 }
+
 
 // See https://bioinformatics.stackexchange.com/questions/20227/how-does-one-account-for-both-single-end-and-paired-end-reads-as-input-in-a-next
 ch_samplesheet = Channel.fromPath(params.samplesheet, checkIfExists: true)

@@ -11,6 +11,7 @@ process bowtie2 {
     tuple val(sample_name), path(reads), val(is_SE)
 
     output:
+    tuple val(sample_name), path("${sample_name}.mapped_unmapped.bam"), emit: bowtie2_mapped_unmapped_bam
     tuple val(sample_name), path("${sample_name}.both_unmapped.bam"), val(is_SE), emit: bowtie2_bam_both_unmapped_bam
     path("${sample_name}.mapped_unmapped.stats"), emit: samtools_stats
 
